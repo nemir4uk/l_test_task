@@ -25,8 +25,8 @@ async def verify_api_key(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# app = FastAPI(dependencies=[Depends(verify_api_key)])
-app = FastAPI()
+app = FastAPI(dependencies=[Depends(verify_api_key)])
+# app = FastAPI()
 router = APIRouter(prefix='/api/v1')
 
 
