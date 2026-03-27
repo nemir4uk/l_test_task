@@ -97,7 +97,7 @@ async def get_payment_info(
     stmt = select(Payments).where(Payments.id == payment_id)
     res = await session.execute(stmt)
     payment_info = res.fetchone()
-    return JSONResponse(content=payment_info._asdict(), status_code=200)
+    return JSONResponse(content=jsonable_encoder(payment_info._asdict()), status_code=200)
 
 
 app.include_router(router)

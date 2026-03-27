@@ -26,7 +26,7 @@ async def fake_process_payment(retry_count):
         if success_chance > 0.1:
             return True, 0
         else:
-            ttl = math.exp(retry_count) * 1000
+            ttl = math.exp(retry_count + 1) * 1000
             return False, ttl
     except BaseException:
         raise
