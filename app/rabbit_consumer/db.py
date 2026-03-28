@@ -69,7 +69,7 @@ class OutboxMessage(PgBase):
 
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
     queue: Mapped[str]
-    processed: Mapped[bool]
+    processed: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

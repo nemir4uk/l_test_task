@@ -3,10 +3,10 @@ import uvicorn
 from typing import Annotated
 import logging
 from fastapi import FastAPI, Depends, HTTPException, Header, Body, APIRouter
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import select, func, literal, cast
+from sqlalchemy.dialects.postgresql import insert, JSON
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from db import get_async_session, Payload, Payments, OutboxMessage
@@ -48,45 +48,67 @@ def get_full_data(
     )
 
 
+@app.exception_handler(DBAPIError)
+async def db_api_error_handler(request: Request, exc: DBAPIError):
+    logger.error(f"Database error occurred: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "База данных временно недоступна"}
+    )
+
+
 @router.post("/payments")
 async def send_to_db(
         payload: Annotated[Payload, Depends(get_full_data)],
         session: Annotated[AsyncSession, Depends(get_async_session)]
 ):
-    try:
-        async with session.begin():
-            stmt = insert(Payments).values(amount=payload.amount,
-                                           currency=payload.currency,
-                                           description=payload.description,
-                                           metadata_info=payload.metadata,
-                                           status="PENDING",
-                                           idempotency_key=payload.idempotency_key,
-                                           webhook_url=payload.webhook_url).returning(Payments.id, Payments.created_at)
-            result = await session.execute(stmt)
-            returned_data = result.first()
-            outbox_payload = {
-                "payment_id": returned_data.id,
-                "amount": payload.amount,
-                "currency": payload.currency,
-                "description": payload.description,
-                "metadata_info": payload.metadata,
-                "idempotency_key": payload.idempotency_key,
-                "webhook_url": payload.webhook_url
-            }
+    async with ((session.begin())):
+        payment_insert_stmt = insert(Payments).values(amount=payload.amount,
+                                       currency=payload.currency,
+                                       description=payload.description,
+                                       metadata_info=payload.metadata,
+                                       status="PENDING",
+                                       idempotency_key=payload.idempotency_key,
+                                       webhook_url=payload.webhook_url
+                                       ).on_conflict_do_nothing(index_elements=['idempotency_key']
+                                                                ).returning(Payments.id,
+                                                                            Payments.created_at,
+                                                                            Payments.status).cte("new_payment")
 
-            outbox_stmt = insert(OutboxMessage).values(
-                payload=outbox_payload,
-                queue=settings.rabbit_queue
+        outbox_stmt = insert(OutboxMessage).from_select(
+            ["payload", "queue", "processed"], select(
+                func.json_build_object(
+                    'payment_id', payment_insert_stmt.c.id,
+                    "amount", payload.amount,
+                    "currency", payload.currency.value,
+                    "description", payload.description,
+                    "metadata_info", cast(payload.metadata, JSON),
+                    "idempotency_key", payload.idempotency_key,
+                    "webhook_url", payload.webhook_url
+                ),
+                literal(settings.rabbit_queue),
+                literal(False)
+            ).select_from(payment_insert_stmt)
+        )
+
+        final_query = (
+            select(payment_insert_stmt.c.id, payment_insert_stmt.c.created_at, payment_insert_stmt.c.status)
+            .union_all(
+                select(Payments.id, Payments.created_at, Payments.status)
+                .where(Payments.idempotency_key == payload.idempotency_key)
             )
-            await session.execute(outbox_stmt)
-            content = jsonable_encoder({
-                "payment_id": returned_data.id,
-                "status": "PENDING",
-                "created_at": returned_data.created_at
-            })
-        return JSONResponse(content=content, status_code=202)
-    except IntegrityError:
-        return JSONResponse(content={"message": "Duplicate Order"}, status_code=409)
+            .limit(1)
+        )
+        await session.execute(outbox_stmt)
+        result = await session.execute(final_query)
+        returned_data = result.fetchone()
+        content = jsonable_encoder({
+            "payment_id": returned_data.id,
+            "status": returned_data.status,
+            "created_at": returned_data.created_at
+        })
+    return JSONResponse(content=content, status_code=202)
+
 
 
 @router.get("/paynents/{payment_id}")
