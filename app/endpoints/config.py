@@ -5,6 +5,9 @@ load_dotenv(find_dotenv())
 
 
 class Setting(BaseSettings):
+    endpoint_host: str = getenv('ENDPOINT_HOST')
+    endpoint_port: str = getenv('ENDPOINT_PORT')
+
     rabbit_host: str = getenv('RABBITMQ_HOST')
     rabbit_port: str = getenv('RABBITMQ_PORT')
     rabbit_user: str = getenv('RABBITMQ_USER')

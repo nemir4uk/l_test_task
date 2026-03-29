@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from db import get_async_session, Payload, Payments, OutboxMessage
-from config import settings
+from endpoints.db import get_async_session, Payload, Payments, OutboxMessage
+from endpoints.config import settings
+from pydantic_core import ValidationError
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -54,6 +55,17 @@ async def db_api_error_handler(request: Request, exc: DBAPIError):
     return JSONResponse(
         status_code=503,
         content={"detail": "База данных временно недоступна"}
+    )
+
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "message": "Ошибка валидации данных",
+            "errors": exc.errors(),
+        },
     )
 
 
@@ -111,7 +123,7 @@ async def send_to_db(
 
 
 
-@router.get("/paynents/{payment_id}")
+@router.get("/payments/{payment_id}")
 async def get_payment_info(
         payment_id: int,
         session: Annotated[AsyncSession, Depends(get_async_session)]
@@ -119,10 +131,13 @@ async def get_payment_info(
     stmt = select(Payments).where(Payments.id == payment_id)
     res = await session.execute(stmt)
     payment_info = res.fetchone()
-    return JSONResponse(content=jsonable_encoder(payment_info._asdict()), status_code=200)
+    if payment_info:
+        return JSONResponse(content=jsonable_encoder(payment_info._asdict()), status_code=200)
+    else:
+        return JSONResponse(content={'message': 'wrong payment_id'}, status_code=404)
 
 
 app.include_router(router)
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("endpoints.main:app", host="0.0.0.0", port=8000, reload=True)

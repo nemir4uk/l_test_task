@@ -1,12 +1,12 @@
 import enum
 from datetime import datetime
 from typing import Any, Dict
-from pydantic import BaseModel, AwareDatetime
+from pydantic import BaseModel, AwareDatetime, Field
 from sqlalchemy import BigInteger, Identity, DateTime, func, Enum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from config import settings
+from endpoints.config import settings
 
 
 async_engine_pg = create_async_engine(f'postgresql+asyncpg://{settings.pg_user}:{settings.pg_pass}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}',
@@ -35,7 +35,7 @@ class Status(str, enum.Enum):
 
 
 class Payload(BaseModel):
-    amount: int
+    amount: int = Field(gt=0)
     currency: Currency
     description: str
     metadata: Dict[str, Any] = {}
