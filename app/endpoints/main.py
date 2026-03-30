@@ -1,15 +1,12 @@
-from fastapi.encoders import jsonable_encoder
 import uvicorn
 from typing import Annotated
 import logging
 from fastapi import FastAPI, Depends, HTTPException, Header, Body, APIRouter
-from sqlalchemy import select, func, literal, cast
-from sqlalchemy.dialects.postgresql import insert, JSON
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from endpoints.db import get_async_session, Payload, Payments, OutboxMessage
+from endpoints.db import get_async_session, Payload, get_payment_info_statement, send_to_db
 from endpoints.config import settings
 from pydantic_core import ValidationError
 
@@ -70,56 +67,11 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
 
 
 @router.post("/payments")
-async def send_to_db(
+async def payment_creation(
         payload: Annotated[Payload, Depends(get_full_data)],
         session: Annotated[AsyncSession, Depends(get_async_session)]
 ):
-    async with ((session.begin())):
-        payment_insert_stmt = insert(Payments).values(amount=payload.amount,
-                                       currency=payload.currency,
-                                       description=payload.description,
-                                       metadata_info=payload.metadata,
-                                       status="PENDING",
-                                       idempotency_key=payload.idempotency_key,
-                                       webhook_url=payload.webhook_url
-                                       ).on_conflict_do_nothing(index_elements=['idempotency_key']
-                                                                ).returning(Payments.id,
-                                                                            Payments.created_at,
-                                                                            Payments.status).cte("new_payment")
-
-        outbox_stmt = insert(OutboxMessage).from_select(
-            ["payload", "queue", "processed"], select(
-                func.json_build_object(
-                    'payment_id', payment_insert_stmt.c.id,
-                    "amount", payload.amount,
-                    "currency", payload.currency.value,
-                    "description", payload.description,
-                    "metadata_info", cast(payload.metadata, JSON),
-                    "idempotency_key", payload.idempotency_key,
-                    "webhook_url", payload.webhook_url
-                ),
-                literal(settings.rabbit_queue),
-                literal(False)
-            ).select_from(payment_insert_stmt)
-        )
-
-        final_query = (
-            select(payment_insert_stmt.c.id, payment_insert_stmt.c.created_at, payment_insert_stmt.c.status)
-            .union_all(
-                select(Payments.id, Payments.created_at, Payments.status)
-                .where(Payments.idempotency_key == payload.idempotency_key)
-            )
-            .limit(1)
-        )
-        await session.execute(outbox_stmt)
-        result = await session.execute(final_query)
-        returned_data = result.fetchone()
-        content = jsonable_encoder({
-            "payment_id": returned_data.id,
-            "status": returned_data.status,
-            "created_at": returned_data.created_at
-        })
-    return JSONResponse(content=content, status_code=202)
+    return await send_to_db(payload, session)
 
 
 
@@ -128,13 +80,7 @@ async def get_payment_info(
         payment_id: int,
         session: Annotated[AsyncSession, Depends(get_async_session)]
 ):
-    stmt = select(Payments).where(Payments.id == payment_id)
-    res = await session.execute(stmt)
-    payment_info = res.fetchone()
-    if payment_info:
-        return JSONResponse(content=jsonable_encoder(payment_info._asdict()), status_code=200)
-    else:
-        return JSONResponse(content={'message': 'wrong payment_id'}, status_code=404)
+    return await get_payment_info_statement(payment_id, session)
 
 
 app.include_router(router)

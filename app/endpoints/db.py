@@ -1,11 +1,13 @@
 import enum
 from datetime import datetime
 from typing import Any, Dict
-from pydantic import BaseModel, AwareDatetime, Field
-from sqlalchemy import BigInteger, Identity, DateTime, func, Enum
+from pydantic import BaseModel, Field
+from sqlalchemy import BigInteger, Identity, DateTime, func, Enum, select, literal, cast
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import insert, JSON
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from starlette.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from endpoints.config import settings
 
 
@@ -70,3 +72,62 @@ class OutboxMessage(PgBase):
     queue: Mapped[str]
     processed: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+async def get_payment_info_statement(payment_id, session: Async_Session_pg):
+    stmt = select(Payments).where(Payments.id == payment_id)
+    res = await session.execute(stmt)
+    payment_info = res.fetchone()
+    if payment_info:
+        return JSONResponse(content=jsonable_encoder(payment_info._asdict()), status_code=200)
+    else:
+        return JSONResponse(content={'message': 'wrong payment_id'}, status_code=404)
+
+
+async def send_to_db(payload: Payload, session: Async_Session_pg):
+    async with ((session.begin())):
+        payment_insert_stmt = insert(Payments).values(amount=payload.amount,
+                                       currency=payload.currency,
+                                       description=payload.description,
+                                       metadata_info=payload.metadata,
+                                       status="PENDING",
+                                       idempotency_key=payload.idempotency_key,
+                                       webhook_url=payload.webhook_url
+                                       ).on_conflict_do_nothing(index_elements=['idempotency_key']
+                                                                ).returning(Payments.id,
+                                                                            Payments.created_at,
+                                                                            Payments.status).cte("new_payment")
+
+        outbox_stmt = insert(OutboxMessage).from_select(
+            ["payload", "queue", "processed"], select(
+                func.json_build_object(
+                    'payment_id', payment_insert_stmt.c.id,
+                    "amount", payload.amount,
+                    "currency", payload.currency.value,
+                    "description", payload.description,
+                    "metadata_info", cast(payload.metadata, JSON),
+                    "idempotency_key", payload.idempotency_key,
+                    "webhook_url", payload.webhook_url
+                ),
+                literal(settings.rabbit_queue),
+                literal(False)
+            ).select_from(payment_insert_stmt)
+        )
+
+        final_query = (
+            select(payment_insert_stmt.c.id, payment_insert_stmt.c.created_at, payment_insert_stmt.c.status)
+            .union_all(
+                select(Payments.id, Payments.created_at, Payments.status)
+                .where(Payments.idempotency_key == payload.idempotency_key)
+            )
+            .limit(1)
+        )
+        await session.execute(outbox_stmt)
+        result = await session.execute(final_query)
+        returned_data = result.fetchone()
+        content = jsonable_encoder({
+            "payment_id": returned_data.id,
+            "status": returned_data.status,
+            "created_at": returned_data.created_at
+        })
+    return JSONResponse(content=content, status_code=202)
